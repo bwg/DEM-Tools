@@ -1,11 +1,12 @@
 from sys import stderr
 from urlparse import urlparse, urljoin
-from os import unlink, close, write, chmod, makedirs
-from os.path import basename, exists, isdir, join
+from os import unlink, close, write, chmod, makedirs, rename, walk, rmdir
+from os.path import basename, exists, isdir, join, splitext
 from httplib import HTTPConnection
-from tempfile import mkstemp
+from tempfile import mkstemp, mkdtemp
 from zipfile import ZipFile
 from hashlib import md5
+from shutil import rmtree
 
 from .SRTM3 import sref, quads, filename, datasource as srtm3_datasource
 
@@ -14,7 +15,8 @@ from osgeo import gdal
 def datasource(lat, lon, source_dir):
     """
     """
-    fmt = 'http://viewfinderpanos-index.herokuapp.com/index.php/%s.hgt'
+    # fmt = 'http://viewfinderpanos-index.herokuapp.com/index.php/%s.hgt'
+    fmt = 'http://brillo.stamen.com/elevation/viewfinder-dems/index/%s.hgt'
     url = fmt % filename(lat, lon)
     
     #
@@ -78,28 +80,49 @@ def datasource(lat, lon, source_dir):
     assert resp.status in range(200, 299), (resp.status, resp.read())
     
     try:
-        #
-        # Get the DEM out of the zip file
-        #
-        handle, zip_path = mkstemp(prefix='vfp-', suffix='.zip')
+        # create a temp directory to hold our zip file
+        archive_dir = mkdtemp(prefix='vfp-', suffix='-temp', dir=source_dir)
+
+        # write the zipfile to disk
+        handle, archive_path = mkstemp(prefix='vfp-', suffix='.zip', dir=archive_dir)
         write(handle, resp.read())
         close(handle)
         
-        zipfile = ZipFile(zip_path, 'r')
+        # extract all the zip contents
+        print >> stderr, 'extracting zipfile', basename(path)
+        archive = ZipFile(archive_path, 'r')
+        archive.extractall(archive_dir)
         
-        #
-        # Write the actual DEM
-        #
-        print >> stderr, 'Extracting', zip_filepath, 'to', dem_path
-    
-        dem_file = open(dem_path, 'w')
-        dem_file.write(zipfile.read(zip_filepath))
-        dem_file.close()
-        
-        chmod(dem_path, 0666)
-    
+        # loop through the zip contents and create new dirs
+        # for any .hgt files
+        for archive_root, archive_dirs, archive_files in walk(archive_dir):
+            for archive_file in archive_files:
+                zipdem_base, zipdem_ext = splitext(archive_file)
+
+                # ignore non demfiles
+                if '.hgt' != zipdem_ext:
+                    continue
+                
+                zdem_url = fmt % zipdem_base
+                s, host, path, p, q, f = urlparse(zdem_url)
+
+                # create the directory hash
+                zdem_dir = join(source_dir, md5(zdem_url).hexdigest()[:3])
+
+                # this is where we want to copy the extracted dem file
+                zdem_path = join(zdem_dir, basename(path))
+
+                # create the directory if necessary
+                if not exists(zdem_dir):
+                    makedirs(zdem_dir)
+                    chmod(dem_dir, 0777)
+                
+                # copy the extracted dem to the new directory
+                print >> stderr, 'moving', archive_file, 'to', zdem_path
+                rename(join(archive_root, archive_file), zdem_path)
+                chmod(zdem_path, 0666)
     finally:
-        unlink(zip_path)
+        rmtree(archive_dir, True)
 
     #
     # The file better exist locally now
